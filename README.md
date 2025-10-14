@@ -2,16 +2,24 @@
 
 A comprehensive Streamlit-based application for creating balanced, non-overlapping data panels with precise stratification control.
 
+## 🎉 New in Version 1.3
+
+- **N-Way Panel Splitting**: Split panels into any number of sets (2, 3, 4, etc.) - not just two!
+- **User-Specified Subdivision**: Choose exactly how many sub-sets each panel should be split into
+- **Enhanced Statistics**: Compare distributions across all N sets with max deviation tracking
+- **Flexible File Naming**: Automatic naming convention `panel_X_set_Y.csv` for any number of sets
+
 ## Features
 
 - **Upload & Analyze**: Support for CSV and Excel files with automatic validation
 - **Flexible Stratification**: Select any columns for stratification with custom target proportions
+- **Equal Deviation Distribution**: When samples are insufficient, deviation is distributed equally across ALL panels (Version 1.2)
 - **Multi-Panel Creation**: Create multiple non-overlapping panels with iterative proportional fitting
-- **Balanced Splitting**: Split each panel into two equally sized, stratified sets (Set A & Set B)
+- **N-Way Splitting**: Split each panel into 2, 3, 4, or more equally sized, stratified sets (NEW!)
 - **Comprehensive Validation**: 
   - Distribution matching verification
   - Overlap detection across all panels and sets
-  - Detailed statistical summaries
+  - Detailed statistical summaries for all N sets
 - **Easy Export**: Download individual files or batch export all results to CSV
 
 ## Installation
