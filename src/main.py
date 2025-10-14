@@ -481,6 +481,17 @@ def main():
                 st.metric("Dataset Utilization", f"{utilization:.1f}%")
             
             # Individual panel statistics
+            # Extract adjusted targets if adjustments were made
+            adjusted_targets = None
+            if 'allocation_info' in panel_stats and panel_stats['allocation_info']['adjustments_made']:
+                # Build adjusted_targets dict from allocation_info
+                adjusted_targets = {}
+                for feature, feature_info in panel_stats['allocation_info']['features'].items():
+                    if feature_info.get('needs_adjustment', False):
+                        adjusted_targets[feature] = {}
+                        for cat, cat_info in feature_info['categories'].items():
+                            adjusted_targets[feature][cat] = cat_info['adjusted_proportion']
+            
             for i, (panel, summary) in enumerate(zip(panels, panel_stats['panel_summaries'])):
                 with st.expander(f"📋 Panel {i+1} Details (n={len(panel):,})", expanded=False):
                     
@@ -488,7 +499,8 @@ def main():
                         st.write(f"**{feature} Distribution:**")
                         
                         dist_table = print_distribution_table(
-                            panel, feature, target_dict, f"Panel {i+1}"
+                            panel, feature, target_dict, f"Panel {i+1}",
+                            adjusted_dict=adjusted_targets
                         )
                         st.dataframe(dist_table, use_container_width=True)
                         

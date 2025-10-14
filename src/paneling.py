@@ -199,6 +199,119 @@ def create_balanced_sample(df: pd.DataFrame,
     return df[df['original_index'].isin(original_indices)].copy()
 
 
+def compute_adjusted_targets(master_df: pd.DataFrame,
+                           target_dict: Dict[str, Dict[str, float]],
+                           features: List[str],
+                           num_panels: int,
+                           panel_size: int) -> Tuple[Dict[str, Dict[str, float]], Dict]:
+    """
+    Pre-compute adjusted target distributions for each panel to distribute 
+    deviation equally when samples are insufficient.
+    
+    This function ensures that when a category has insufficient samples:
+    1. Available samples are divided EQUALLY across all panels
+    2. The proportions are adjusted to maintain sum=1.0 constraint
+    3. All panels get the same adjusted targets (equal deviation)
+    
+    Args:
+        master_df: Master dataframe
+        target_dict: Ideal target proportions
+        features: Features to stratify on
+        num_panels: Number of panels to create
+        panel_size: Size of each panel
+    
+    Returns:
+        Tuple of (adjusted_target_dict, allocation_info)
+    """
+    total_needed = num_panels * panel_size
+    allocation_info = {
+        'features': {},
+        'warnings': [],
+        'adjustments_made': False
+    }
+    
+    adjusted_targets = {}
+    
+    for feature in features:
+        if feature not in master_df.columns:
+            continue
+        
+        if feature not in target_dict:
+            continue
+        
+        feature_info = {
+            'categories': {},
+            'needs_adjustment': False
+        }
+        
+        adjusted_targets[feature] = {}
+        
+        # First pass: compute raw adjusted counts per panel for each category
+        raw_counts_per_panel = {}
+        
+        for category, ideal_proportion in target_dict[feature].items():
+            # How many samples we ideally want per panel
+            ideal_per_panel = panel_size * ideal_proportion
+            ideal_total = int(np.round(total_needed * ideal_proportion))
+            
+            # How many samples are actually available
+            available_count = (master_df[feature] == category).sum()
+            
+            if available_count < ideal_total:
+                # Insufficient samples - distribute equally across panels
+                feasible_per_panel = available_count / num_panels
+                raw_counts_per_panel[category] = feasible_per_panel
+                
+                feature_info['needs_adjustment'] = True
+                allocation_info['adjustments_made'] = True
+                
+                feature_info['categories'][category] = {
+                    'ideal_proportion': ideal_proportion,
+                    'ideal_total': ideal_total,
+                    'ideal_per_panel': int(ideal_per_panel),
+                    'available': available_count,
+                    'shortfall': ideal_total - available_count,
+                    'raw_per_panel': feasible_per_panel,
+                    'per_panel': int(feasible_per_panel)
+                }
+                
+                allocation_info['warnings'].append(
+                    f"⚠️ {feature}.{category}: Only {available_count} available, need {ideal_total}. "
+                    f"Each panel will get ~{int(feasible_per_panel)} instead of {int(ideal_per_panel)}."
+                )
+            else:
+                # Sufficient samples - use ideal target
+                raw_counts_per_panel[category] = ideal_per_panel
+                
+                feature_info['categories'][category] = {
+                    'ideal_proportion': ideal_proportion,
+                    'ideal_total': ideal_total,
+                    'ideal_per_panel': int(ideal_per_panel),
+                    'available': available_count,
+                    'shortfall': 0,
+                    'raw_per_panel': ideal_per_panel,
+                    'per_panel': int(ideal_per_panel)
+                }
+        
+        # Second pass: convert counts to proportions (normalizing to sum=1.0)
+        total_count_per_panel = sum(raw_counts_per_panel.values())
+        
+        for category in raw_counts_per_panel:
+            if total_count_per_panel > 0:
+                adjusted_proportion = raw_counts_per_panel[category] / total_count_per_panel
+                adjusted_targets[feature][category] = adjusted_proportion
+                
+                # Update the adjusted proportion in feature_info
+                if category in feature_info['categories']:
+                    feature_info['categories'][category]['adjusted_proportion'] = adjusted_proportion
+            else:
+                adjusted_targets[feature][category] = target_dict[feature][category]
+        
+        allocation_info['features'][feature] = feature_info
+    
+    return adjusted_targets, allocation_info
+
+
 def create_panels(master_df: pd.DataFrame,
                  target_dict: Dict[str, Dict[str, float]],
                  features: List[str],
@@ -206,7 +319,13 @@ def create_panels(master_df: pd.DataFrame,
                  panel_size: int,
                  random_state: int = 42) -> Tuple[List[pd.DataFrame], Dict]:
     """
-    Create multiple non-overlapping panels with balanced distributions
+    Create multiple non-overlapping panels with balanced distributions.
+    
+    NEW BEHAVIOR: When samples are insufficient to meet targets, deviation is
+    distributed EQUALLY across all panels instead of accumulating in the last panel.
+    
+    This is achieved by PRE-ALLOCATING samples to panels before sampling,
+    ensuring each panel gets its fair share of constrained categories.
     
     Returns:
         Tuple of (list of panels, summary statistics)
@@ -215,9 +334,54 @@ def create_panels(master_df: pd.DataFrame,
     master_df = master_df.reset_index(drop=False).rename(columns={'index': 'original_index'})
     master_df.index.name = 'index'
     
+    # Pre-compute adjusted targets that distribute deviation equally
+    adjusted_targets, allocation_info = compute_adjusted_targets(
+        master_df, target_dict, features, num_panels, panel_size
+    )
+    
+    # Display warnings about adjustments
+    if allocation_info['adjustments_made']:
+        st.warning("⚠️ **Insufficient samples for ideal targets - deviation distributed equally across all panels:**")
+        for warning in allocation_info['warnings']:
+            st.warning(warning)
+        st.info("📌 **Equal Deviation Distribution**: All panels will have similar distributions. "
+                "No single panel will absorb all the shortfall.")
+    
     # Check master distribution
     dist_info = check_master_distribution(master_df, target_dict, features)
     
+    # PRE-ALLOCATE samples to panels for constrained categories
+    # This ensures equal distribution when samples are insufficient
+    np.random.seed(random_state)
+    
+    # Strategy: For constrained categories, divide samples equally and pre-assign to panels
+    # For unconstrained categories, let the sampling algorithm handle them normally
+    
+    pre_allocated_by_panel = {i: set() for i in range(num_panels)}
+    constrained_categories = {}  # Track which categories are constrained per feature
+    
+    for feature in features:
+        if feature in allocation_info['features']:
+            feature_info = allocation_info['features'][feature]
+            if feature_info['needs_adjustment']:
+                constrained_categories[feature] = set()
+                
+                for cat, cat_info in feature_info['categories'].items():
+                    if cat_info['shortfall'] > 0:
+                        # This category is constrained - pre-allocate equally
+                        constrained_categories[feature].add(cat)
+                        
+                        cat_indices = master_df[master_df[feature] == cat].index.tolist()
+                        np.random.shuffle(cat_indices)
+                        
+                        # Divide equally among panels
+                        per_panel = cat_info['per_panel']
+                        for panel_idx in range(num_panels):
+                            start = panel_idx * per_panel
+                            end = min(start + per_panel, len(cat_indices))
+                            pre_allocated_by_panel[panel_idx].update(cat_indices[start:end])
+    
+    # Now create panels
     panels = []
     used_indices = set()
     panel_summaries = []
@@ -229,16 +393,74 @@ def create_panels(master_df: pd.DataFrame,
         status_text.text(f"Creating Panel {i+1} of {num_panels}...")
         progress_bar.progress((i + 1) / num_panels)
         
-        panel = create_balanced_sample(
-            master_df,
-            target_dict,
-            panel_size,
-            used_indices,
-            random_state=random_state + i
-        )
+        # Get pre-allocated indices for this panel
+        pre_allocated_indices = pre_allocated_by_panel[i]
+        
+        # Get the pre-allocated samples as a dataframe
+        if len(pre_allocated_indices) > 0:
+            pre_allocated_df = master_df.loc[list(pre_allocated_indices)].copy()
+        else:
+            pre_allocated_df = pd.DataFrame()
+        
+        # Mark pre-allocated as used
+        used_indices.update(pre_allocated_indices)
+        
+        # Calculate remaining needed samples
+        remaining_needed = panel_size - len(pre_allocated_indices)
+        
+        if remaining_needed > 0:
+            # Create modified targets that exclude constrained categories
+            # (since they're already allocated)
+            remaining_targets = {}
+            for feature in features:
+                if feature in adjusted_targets:
+                    remaining_targets[feature] = {}
+                    
+                    # For constrained features, only sample from unconstrained categories
+                    if feature in constrained_categories:
+                        for cat, prop in adjusted_targets[feature].items():
+                            if cat not in constrained_categories[feature]:
+                                remaining_targets[feature][cat] = prop
+                    else:
+                        # Feature not constrained, use all categories
+                        remaining_targets[feature] = adjusted_targets[feature].copy()
+                    
+                    # Re-normalize to sum to 1.0
+                    total = sum(remaining_targets[feature].values())
+                    if total > 0:
+                        for cat in remaining_targets[feature]:
+                            remaining_targets[feature][cat] /= total
+            
+            # Sample remaining needed samples (excluding constrained categories)
+            if remaining_needed > 0 and any(remaining_targets.values()):
+                remaining_df = create_balanced_sample(
+                    master_df,
+                    remaining_targets,
+                    remaining_needed,
+                    used_indices,
+                    random_state=random_state + i
+                )
+                used_indices.update(remaining_df.index.tolist())
+            else:
+                # Just sample randomly from what's left
+                available = master_df[~master_df.index.isin(used_indices)]
+                if len(available) >= remaining_needed:
+                    remaining_df = available.sample(n=remaining_needed, random_state=random_state + i)
+                else:
+                    remaining_df = available
+                used_indices.update(remaining_df.index.tolist())
+        else:
+            remaining_df = pd.DataFrame()
+        
+        # Combine pre-allocated and remaining samples
+        if len(pre_allocated_df) > 0 and len(remaining_df) > 0:
+            panel = pd.concat([pre_allocated_df, remaining_df])
+        elif len(pre_allocated_df) > 0:
+            panel = pre_allocated_df
+        else:
+            panel = remaining_df
         
         panels.append(panel)
-        used_indices.update(panel['original_index'].values)
         
         # Calculate summary statistics
         summary = {
@@ -252,15 +474,21 @@ def create_panels(master_df: pd.DataFrame,
             
             feature_summary = {}
             if feature in target_dict:
-                for cat, target in target_dict[feature].items():
+                for cat, ideal_target in target_dict[feature].items():
+                    # Get adjusted target for comparison
+                    adjusted_target = adjusted_targets.get(feature, {}).get(cat, ideal_target)
+                    
                     actual_val = actual.get(cat, 0)
-                    deviation = actual_val - target
+                    deviation_from_ideal = actual_val - ideal_target
+                    deviation_from_adjusted = actual_val - adjusted_target
                     
                     feature_summary[cat] = {
-                        'target': target,
+                        'ideal_target': ideal_target,
+                        'adjusted_target': adjusted_target,
                         'actual': actual_val,
-                        'deviation': deviation,
-                        'status': 'Match' if abs(deviation) < 0.03 else 'Deviation'
+                        'deviation_from_ideal': deviation_from_ideal,
+                        'deviation_from_adjusted': deviation_from_adjusted,
+                        'status': 'Match' if abs(deviation_from_adjusted) < 0.03 else 'Deviation'
                     }
             
             summary['distributions'][feature] = feature_summary
@@ -275,6 +503,7 @@ def create_panels(master_df: pd.DataFrame,
     
     return panels, {
         'master_distribution': dist_info,
+        'allocation_info': allocation_info,
         'panel_summaries': panel_summaries,
         'total_used': len(used_indices),
         'total_available': len(master_df)

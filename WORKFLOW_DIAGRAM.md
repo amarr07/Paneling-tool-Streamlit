@@ -59,16 +59,28 @@
 │      Total available: 43,853                                                │
 │      Status: ✓ Sufficient                                                   │
 │      ↓                                                                       │
+│  ⚖️  Pre-compute Adjusted Targets (EQUAL DEVIATION DISTRIBUTION):           │
+│      • For each category, calculate available samples                       │
+│      • If insufficient: distribute shortage EQUALLY across ALL panels       │
+│      • Example: Need 1500 females/panel but only 2500 total available       │
+│        → Each panel gets 625 females (2500÷4), not 1500+1500+0+0            │
+│      ↓                                                                       │
 │  🚀 Create Panels (Multi-dimensional Stratified Sampling)                   │
+│      Using ADJUSTED targets (not ideal targets when samples insufficient)   │
 │      ↓                                                                       │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                     │
 │  │  Panel 1     │  │  Panel 2     │  │  Panel 3     │                     │
 │  │  n = 1,050   │  │  n = 1,050   │  │  n = 1,050   │                     │
 │  │  (Set A+B)   │  │  (Set A+B)   │  │  (Set A+B)   │                     │
+│  │  All panels  │  │  share any   │  │  deviation   │                     │
+│  │  EQUALLY     │  │  EQUALLY     │  │  EQUALLY     │                     │
 │  └──────────────┘  └──────────────┘  └──────────────┘                     │
 │      ↓                  ↓                  ↓                                │
-│  📊 Verify Distributions (Actual vs. Target)                                │
-│      • Deviation tracking                                                   │
+│  📊 Verify Distributions (Actual vs. Ideal vs. Adjusted Target)             │
+│      • Ideal Target: User-specified target                                  │
+│      • Adjusted Target: Feasible target with equal deviation                │
+│      • Actual: Achieved distribution                                        │
+│      • Deviation tracking from adjusted target                              │
 │      • Status indicators (✓ / ✗)                                            │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -125,34 +137,52 @@
 │                        ALGORITHM OVERVIEW                                    │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-PANEL CREATION (Multi-dimensional Stratified Sampling)
-───────────────────────────────────────────────────────
+PANEL CREATION (Multi-dimensional Stratified Sampling with Equal Deviation)
+───────────────────────────────────────────────────────────────────────────
                         Master Dataset (n=43,853)
+                                │
+                    ┌───────────┴───────────────────┐
+                    │  PRE-ALLOCATION PHASE         │
+                    │  (NEW: Equal Deviation Logic) │
+                    └───────────┬───────────────────┘
+                                │
+                    For each feature & category:
+                    • Calculate ideal_needed = num_panels × panel_size × target_prop
+                    • Check available = count in master dataset
+                    • If available < ideal_needed:
+                        → adjusted_per_panel = available ÷ num_panels
+                        → ALL panels get equal adjusted target
+                    • Else: use ideal target
                                 │
                     ┌───────────┴───────────┐
                     │  Feature 1: Gender    │
                     │  Male / Female        │
+                    │  Adjusted if needed   │
                     └───────────┬───────────┘
                                 │
                     ┌───────────┴───────────┐
                     │  Feature 2: Zone      │
                     │  10 categories        │
+                    │  Adjusted if needed   │
                     └───────────┬───────────┘
                                 │
                     ┌───────────┴───────────┐
                     │  Feature 3: 2020 AE   │
                     │  6 parties            │
+                    │  Adjusted if needed   │
                     └───────────┬───────────┘
                                 │
                     ┌───────────┴───────────┐
                     │  Feature 4: 2024 GE   │
                     │  6 parties            │
+                    │  Adjusted if needed   │
                     └───────────┬───────────┘
                                 │
                         Joint Stratification
                                 │
                     ┌───────────┴───────────┐
                     │  Proportional Sampling │
+                    │  Using ADJUSTED targets│
                     │  + Iterative Fitting   │
                     └───────────┬───────────┘
                                 │
@@ -164,6 +194,8 @@ PANEL CREATION (Multi-dimensional Stratified Sampling)
                         ┌───────┴───────┐
                         │               │
                     Panel 1         Panel 2 ...
+                    (Equal          (Equal
+                     deviation)      deviation)
 
 
 PANEL SPLITTING (Joint Stratification)

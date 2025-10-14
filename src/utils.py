@@ -80,9 +80,17 @@ def check_availability(df: pd.DataFrame,
 def print_distribution_table(df: pd.DataFrame, 
                             feature: str, 
                             target_dict: Optional[Dict[str, float]] = None,
-                            set_name: str = "Dataset") -> pd.DataFrame:
+                            set_name: str = "Dataset",
+                            adjusted_dict: Optional[Dict[str, float]] = None) -> pd.DataFrame:
     """
     Create a distribution comparison table for display
+    
+    Args:
+        df: DataFrame to analyze
+        feature: Feature/column name
+        target_dict: Ideal target proportions
+        set_name: Name of the dataset
+        adjusted_dict: Adjusted target proportions (when deviation is distributed)
     
     Returns:
         DataFrame with distribution statistics
@@ -92,21 +100,34 @@ def print_distribution_table(df: pd.DataFrame,
     if target_dict and feature in target_dict:
         rows = []
         for category in sorted(target_dict[feature].keys()):
-            target_val = target_dict[feature][category]
+            ideal_target = target_dict[feature][category]
             actual_val = actual.get(category, 0)
-            deviation = actual_val - target_val
             count = len(df[df[feature] == category])
             
-            status = "✓" if abs(deviation) < 0.03 else "✗"
-            
-            rows.append({
+            row = {
                 'Category': category,
                 'Count': count,
-                'Target': f"{target_val:.3f}",
-                'Actual': f"{actual_val:.3f}",
-                'Deviation': f"{deviation:+.3f}",
-                'Status': status
-            })
+                'Ideal Target': f"{ideal_target:.3f}",
+            }
+            
+            # If we have adjusted targets (due to insufficient samples), show them
+            if adjusted_dict and feature in adjusted_dict and category in adjusted_dict[feature]:
+                adjusted_target = adjusted_dict[feature][category]
+                deviation_from_adjusted = actual_val - adjusted_target
+                
+                row['Adjusted Target'] = f"{adjusted_target:.3f}"
+                row['Actual'] = f"{actual_val:.3f}"
+                row['Dev from Adjusted'] = f"{deviation_from_adjusted:+.3f}"
+                status = "✓" if abs(deviation_from_adjusted) < 0.03 else "✗"
+            else:
+                # No adjustment needed
+                deviation = actual_val - ideal_target
+                row['Actual'] = f"{actual_val:.3f}"
+                row['Deviation'] = f"{deviation:+.3f}"
+                status = "✓" if abs(deviation) < 0.03 else "✗"
+            
+            row['Status'] = status
+            rows.append(row)
         
         result_df = pd.DataFrame(rows)
     else:

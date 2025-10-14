@@ -1,9 +1,115 @@
-# Feature Update: Optional Target Proportions
+# Changelog
 
-## 🎉 What's New
+## Version 1.2 - October 14, 2025
 
-**Date**: October 14, 2025  
-**Version**: 1.1  
+### 🎯 Major Feature: Equal Deviation Distribution Across Panels
+
+**Breaking Change**: Panel creation logic now distributes deviation equally across ALL panels when samples are insufficient.
+
+#### Previous Behavior ❌
+When target categories were underrepresented:
+- Panel 1, 2, 3... would hit exact targets
+- Last panel absorbed ALL deviation
+- Example: Panels 1-3 get 1500 females each, Panel 4 gets 0 (if only 4500 available for 6000 needed)
+- Result: Highly imbalanced final panel
+
+#### New Behavior ✅
+When target categories are underrepresented:
+- Pre-allocation phase calculates feasible distribution
+- **ALL panels share deviation EQUALLY**
+- Example: Panels 1-4 each get 1125 females (4500÷4) instead of 1500+1500+1500+0
+- Result: All panels balanced and usable
+
+#### Key Changes
+
+1. **New Function: `compute_adjusted_targets()`**
+   - Pre-computes feasible targets before sampling
+   - Distributes available samples equally across all panels
+   - Normalizes adjusted proportions to sum to 1.0
+
+2. **Updated `create_panels()`**
+   - Now uses adjusted targets instead of ideal targets when samples insufficient
+   - Displays warnings showing adjustments made
+   - Reports both ideal and adjusted targets in summary
+
+3. **Enhanced Display**
+   - Shows "Ideal Target" (user-specified)
+   - Shows "Adjusted Target" (feasible with equal distribution)
+   - Shows "Actual" (achieved distribution)
+   - Calculates deviation from adjusted target
+   - Clear warnings when adjustments are made
+
+#### Example Scenario
+
+**Setup:**
+- 4 panels of 3000 samples each (12,000 total needed)
+- Target: 50% female (6,000 females needed)
+- Available: Only 2,500 females in dataset
+
+**Old Behavior:**
+```
+Panel 1: 1500 females (50% ✓)
+Panel 2: 1000 females (33% ✗)
+Panel 3: 0 females (0% ✗✗✗)
+Panel 4: 0 females (0% ✗✗✗)
+```
+
+**New Behavior:**
+```
+⚠️ Adjustment: Only 2,500 females available, need 6,000
+Each panel will get ~625 females instead of 1,500
+
+Panel 1: 625 females (20.8% ✓ matches adjusted target)
+Panel 2: 625 females (20.8% ✓ matches adjusted target)
+Panel 3: 625 females (20.8% ✓ matches adjusted target)
+Panel 4: 625 females (20.8% ✓ matches adjusted target)
+```
+
+#### Benefits
+
+✅ **Fair Distribution**: All panels equally usable  
+✅ **Transparent**: Clear warnings about adjustments  
+✅ **Predictable**: No surprise deviation in last panel  
+✅ **Documented**: Shows ideal vs adjusted vs actual  
+✅ **Professional**: All panels meet research standards  
+
+#### Technical Details
+
+```python
+# Pre-allocation logic
+for each feature and category:
+    ideal_total = num_panels × panel_size × target_proportion
+    available_count = count in master dataset
+    
+    if available_count < ideal_total:
+        feasible_per_panel = available_count / num_panels
+        adjusted_proportion = feasible_per_panel / panel_size
+        # Use adjusted_proportion for all panels
+    else:
+        # Use ideal target_proportion
+```
+
+#### UI Updates
+
+- **Warnings Section**: Shows which categories are adjusted
+- **Distribution Tables**: Now display 3 values:
+  - Ideal Target (user input)
+  - Adjusted Target (system computed)
+  - Actual (achieved)
+- **Status Indicators**: Compare actual to adjusted target (not ideal)
+
+#### Documentation Updates
+
+- ✅ Updated WORKFLOW_DIAGRAM.md with pre-allocation phase
+- ✅ Updated algorithm overview section
+- ✅ This changelog entry
+
+---
+
+## Version 1.1 - October 14, 2025
+
+### 🎉 Feature Update: Optional Target Proportions
+
 **Update**: Flexible Target Proportion Configuration
 
 ## 📝 Summary
