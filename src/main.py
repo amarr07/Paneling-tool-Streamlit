@@ -520,32 +520,51 @@ def main():
         selected_features = st.session_state.selected_features
         
         st.markdown("""
-        Split each panel into two equal, balanced sets (Set A and Set B).
+        Split each panel into multiple equal, balanced sets.
         Each set will maintain the same proportional distributions as the parent panel.
         """)
         
-        # Random seed for splitting
-        split_seed = st.number_input(
-            "Random Seed for Splitting",
-            min_value=0,
-            value=42,
-            help="Set seed for reproducible splits"
-        )
+        # Configuration
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            num_sets = st.number_input(
+                "Number of Sets per Panel",
+                min_value=2,
+                max_value=10,
+                value=2,
+                help="How many sets to split each panel into (e.g., 2, 3, 4, etc.)"
+            )
+        
+        with col2:
+            split_seed = st.number_input(
+                "Random Seed for Splitting",
+                min_value=0,
+                value=42,
+                help="Set seed for reproducible splits"
+            )
+        
+        # Info box
+        st.info(f"ℹ️ Each of the {len(panels)} panels will be split into {num_sets} sets. "
+                f"Total: **{len(panels) * num_sets} sets** will be created.")
         
         if st.button("✂️ Split All Panels", type="primary"):
-            with st.spinner("Splitting panels... Please wait."):
+            with st.spinner(f"Splitting panels into {num_sets} sets each... Please wait."):
                 try:
                     panel_splits, split_stats = split_all_panels(
                         panels,
                         target_dict,
                         selected_features,
-                        split_seed
+                        num_sets=num_sets,
+                        random_state=split_seed
                     )
                     
                     st.session_state.panel_splits = panel_splits
                     st.session_state.split_stats = split_stats
                     
-                    st.success(f"✓ Successfully split {len(panels)} panels into {len(panel_splits) * 2} sets!")
+                    total_sets = len(panel_splits) * num_sets
+                    st.success(f"✓ Successfully split {len(panels)} panels into {total_sets} sets "
+                              f"({num_sets} sets per panel)!")
                     
                 except Exception as e:
                     st.error(f"❌ Error splitting panels: {str(e)}")
@@ -559,27 +578,47 @@ def main():
             
             panel_splits = st.session_state.panel_splits
             split_stats = st.session_state.split_stats
+            num_sets_created = split_stats.get('num_sets', 2)
             
-            for i, ((set_a, set_b), summary) in enumerate(zip(panel_splits, split_stats['split_summaries']), 1):
-                with st.expander(f"📊 Panel {i} Split Analysis", expanded=False):
+            for panel_idx, (sets, summary) in enumerate(zip(panel_splits, split_stats['split_summaries']), 1):
+                with st.expander(f"📊 Panel {panel_idx} Split Analysis", expanded=False):
                     
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric(f"Set A Size", f"{len(set_a):,}")
-                    with col2:
-                        st.metric(f"Set B Size", f"{len(set_b):,}")
+                    # Display sizes for all sets
+                    cols = st.columns(min(num_sets_created, 5))  # Max 5 columns per row
+                    for set_idx, set_df in enumerate(sets):
+                        with cols[set_idx % 5]:
+                            st.metric(f"Set {set_idx + 1} Size", f"{len(set_df):,}")
                     
                     st.markdown("---")
                     
-                    # Compare distributions
+                    # Compare distributions across all sets
                     for feature in selected_features:
-                        st.write(f"**{feature} Comparison:**")
+                        st.write(f"**{feature} Distribution Across Sets:**")
                         
-                        comparison_table = create_comparison_table(
-                            set_a, set_b, feature,
-                            f"Panel {i} Set A", f"Panel {i} Set B"
-                        )
-                        st.dataframe(comparison_table, use_container_width=True)
+                        # Create comprehensive comparison table
+                        comparison_data = []
+                        
+                        if feature in summary['comparisons']:
+                            for category, cat_info in summary['comparisons'][feature].items():
+                                row = {
+                                    'Category': category,
+                                    'Target': f"{cat_info.get('target', 0):.1%}" if cat_info.get('target') is not None else 'N/A'
+                                }
+                                
+                                # Add column for each set
+                                for set_idx in range(num_sets_created):
+                                    set_val = cat_info['values'].get(f'set_{set_idx + 1}', 0)
+                                    row[f'Set {set_idx + 1}'] = f"{set_val:.1%}"
+                                
+                                # Add deviation metrics
+                                row['Max Deviation'] = f"{cat_info['max_deviation']:.1%}"
+                                row['Status'] = cat_info['status']
+                                
+                                comparison_data.append(row)
+                        
+                        if comparison_data:
+                            comparison_df = pd.DataFrame(comparison_data)
+                            st.dataframe(comparison_df, use_container_width=True)
                         
                         st.markdown("---")
     
@@ -601,9 +640,9 @@ def main():
             with st.spinner("Checking for overlaps..."):
                 # Prepare all sets for checking
                 all_sets = []
-                for i, (set_a, set_b) in enumerate(panel_splits, 1):
-                    all_sets.append((f"Panel {i} Set A", set_a))
-                    all_sets.append((f"Panel {i} Set B", set_b))
+                for panel_idx, sets in enumerate(panel_splits, 1):
+                    for set_idx, set_df in enumerate(sets, 1):
+                        all_sets.append((f"Panel {panel_idx} Set {set_idx}", set_df))
                 
                 overlap_results = check_overlap_between_sets(all_sets)
                 
@@ -622,10 +661,12 @@ def main():
         # Export Section
         st.subheader("💾 Export Results")
         
-        st.markdown("""
+        num_sets_created = st.session_state.split_stats.get('num_sets', 2)
+        
+        st.markdown(f"""
         Export all panels and sets to CSV files. Files will be generated with clear naming:
-        - `panel_1_set_a.csv`, `panel_1_set_b.csv`
-        - `panel_2_set_a.csv`, `panel_2_set_b.csv`
+        - `panel_1_set_1.csv`, `panel_1_set_2.csv`, ... `panel_1_set_{num_sets_created}.csv`
+        - `panel_2_set_1.csv`, `panel_2_set_2.csv`, ... `panel_2_set_{num_sets_created}.csv`
         - etc.
         """)
         
@@ -646,15 +687,11 @@ def main():
                 # Export each set
                 exported_files = []
                 
-                for i, (set_a, set_b) in enumerate(panel_splits, 1):
-                    file_a = output_path / f"panel_{i}_set_a.csv"
-                    file_b = output_path / f"panel_{i}_set_b.csv"
-                    
-                    set_a.to_csv(file_a, index=True)
-                    set_b.to_csv(file_b, index=True)
-                    
-                    exported_files.append(str(file_a))
-                    exported_files.append(str(file_b))
+                for panel_idx, sets in enumerate(panel_splits, 1):
+                    for set_idx, set_df in enumerate(sets, 1):
+                        file_path = output_path / f"panel_{panel_idx}_set_{set_idx}.csv"
+                        set_df.to_csv(file_path, index=True)
+                        exported_files.append(str(file_path))
                 
                 st.success(f"✓ Successfully exported {len(exported_files)} files to {output_dir}")
                 
@@ -670,26 +707,27 @@ def main():
         st.markdown("---")
         st.subheader("Download Individual Files")
         
-        for i, (set_a, set_b) in enumerate(panel_splits, 1):
-            col1, col2 = st.columns(2)
+        for panel_idx, sets in enumerate(panel_splits, 1):
+            st.markdown(f"**Panel {panel_idx}:**")
             
-            with col1:
-                csv_a = set_a.to_csv(index=True)
-                st.download_button(
-                    label=f"📥 Download Panel {i} Set A",
-                    data=csv_a,
-                    file_name=f"panel_{i}_set_a.csv",
-                    mime="text/csv"
-                )
+            # Create columns based on number of sets (max 3 per row for readability)
+            sets_per_row = min(3, len(sets))
             
-            with col2:
-                csv_b = set_b.to_csv(index=True)
-                st.download_button(
-                    label=f"📥 Download Panel {i} Set B",
-                    data=csv_b,
-                    file_name=f"panel_{i}_set_b.csv",
-                    mime="text/csv"
-                )
+            for row_start in range(0, len(sets), sets_per_row):
+                cols = st.columns(sets_per_row)
+                for col_idx, set_idx in enumerate(range(row_start, min(row_start + sets_per_row, len(sets)))):
+                    with cols[col_idx]:
+                        set_df = sets[set_idx]
+                        csv_data = set_df.to_csv(index=True)
+                        st.download_button(
+                            label=f"📥 Set {set_idx + 1}",
+                            data=csv_data,
+                            file_name=f"panel_{panel_idx}_set_{set_idx + 1}.csv",
+                            mime="text/csv",
+                            key=f"download_panel_{panel_idx}_set_{set_idx + 1}"
+                        )
+            
+            st.markdown("")  # Add spacing between panels
         
         # Export summary report
         st.markdown("---")

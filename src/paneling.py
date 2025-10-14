@@ -510,29 +510,35 @@ def create_panels(master_df: pd.DataFrame,
     }
 
 
-def split_panel_into_two(panel: pd.DataFrame,
-                         target_dict: Dict[str, Dict[str, float]],
-                         features: List[str],
-                         random_state: Optional[int] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def split_panel_into_n_sets(panel: pd.DataFrame,
+                            target_dict: Dict[str, Dict[str, float]],
+                            features: List[str],
+                            num_sets: int = 2,
+                            random_state: Optional[int] = None) -> List[pd.DataFrame]:
     """
-    Split a panel into two equal sets while maintaining proportions
+    Split a panel into N equal sets while maintaining proportions
     
     Uses joint stratification across all features to ensure balanced splits.
+    Each stratum is divided as equally as possible across all sets.
     
     Args:
         panel: Panel dataframe to split
         target_dict: Target distributions (for reference)
         features: List of features to maintain balance for
+        num_sets: Number of sets to split into (default: 2)
         random_state: Random seed
     
     Returns:
-        Tuple of (Set A, Set B)
+        List of N dataframes (sets)
     """
+    if num_sets < 2:
+        raise ValueError("Number of sets must be at least 2")
+    
     if random_state is not None:
         np.random.seed(random_state)
     
-    set_a_indices = []
-    set_b_indices = []
+    # Initialize indices for each set
+    set_indices = [[] for _ in range(num_sets)]
     
     panel_copy = panel.copy()
     
@@ -545,40 +551,74 @@ def split_panel_into_two(panel: pd.DataFrame,
         for col in strata_cols[1:]:
             panel_copy['strata'] = panel_copy['strata'] + '_' + panel_copy[col].astype(str)
         
-        # For each unique stratum, split 50-50
+        # For each unique stratum, split evenly across N sets
         for stratum in panel_copy['strata'].unique():
             stratum_indices = panel_copy[panel_copy['strata'] == stratum].index.tolist()
             
             # Shuffle the indices
             np.random.shuffle(stratum_indices)
             
-            # Split approximately 50-50
-            mid_point = len(stratum_indices) // 2
-            set_a_indices.extend(stratum_indices[:mid_point])
-            set_b_indices.extend(stratum_indices[mid_point:])
+            # Distribute evenly across sets
+            for i, idx in enumerate(stratum_indices):
+                set_num = i % num_sets
+                set_indices[set_num].append(idx)
     else:
-        # Fallback: simple random split
+        # Fallback: simple round-robin split
         all_indices = panel.index.tolist()
         np.random.shuffle(all_indices)
-        mid_point = len(all_indices) // 2
-        set_a_indices = all_indices[:mid_point]
-        set_b_indices = all_indices[mid_point:]
+        
+        for i, idx in enumerate(all_indices):
+            set_num = i % num_sets
+            set_indices[set_num].append(idx)
     
-    set_a = panel.loc[set_a_indices]
-    set_b = panel.loc[set_b_indices]
+    # Create dataframes for each set
+    sets = [panel.loc[indices] for indices in set_indices]
     
-    return set_a, set_b
+    return sets
+
+
+def split_panel_into_two(panel: pd.DataFrame,
+                         target_dict: Dict[str, Dict[str, float]],
+                         features: List[str],
+                         random_state: Optional[int] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Split a panel into two equal sets while maintaining proportions
+    
+    DEPRECATED: Use split_panel_into_n_sets with num_sets=2 instead.
+    Kept for backward compatibility.
+    
+    Uses joint stratification across all features to ensure balanced splits.
+    
+    Args:
+        panel: Panel dataframe to split
+        target_dict: Target distributions (for reference)
+        features: List of features to maintain balance for
+        random_state: Random seed
+    
+    Returns:
+        Tuple of (Set A, Set B)
+    """
+    sets = split_panel_into_n_sets(panel, target_dict, features, num_sets=2, random_state=random_state)
+    return sets[0], sets[1]
 
 
 def split_all_panels(panels: List[pd.DataFrame],
                     target_dict: Dict[str, Dict[str, float]],
                     features: List[str],
-                    random_state: int = 42) -> Tuple[List[Tuple[pd.DataFrame, pd.DataFrame]], Dict]:
+                    num_sets: int = 2,
+                    random_state: int = 42) -> Tuple[List[List[pd.DataFrame]], Dict]:
     """
-    Split all panels into two sets each
+    Split all panels into N sets each
+    
+    Args:
+        panels: List of panel dataframes
+        target_dict: Target distributions
+        features: Features to maintain balance for
+        num_sets: Number of sets to split each panel into (default: 2)
+        random_state: Random seed
     
     Returns:
-        Tuple of (list of (Set A, Set B) tuples, summary statistics)
+        Tuple of (list of lists where each inner list contains N sets, summary statistics)
     """
     all_splits = []
     split_summaries = []
@@ -587,47 +627,64 @@ def split_all_panels(panels: List[pd.DataFrame],
     status_text = st.empty()
     
     for i, panel in enumerate(panels, 1):
-        status_text.text(f"Splitting Panel {i} of {len(panels)}...")
+        status_text.text(f"Splitting Panel {i} of {len(panels)} into {num_sets} sets...")
         progress_bar.progress(i / len(panels))
         
-        set_a, set_b = split_panel_into_two(
+        sets = split_panel_into_n_sets(
             panel, 
             target_dict, 
             features,
+            num_sets=num_sets,
             random_state=random_state + i
         )
         
-        all_splits.append((set_a, set_b))
+        all_splits.append(sets)
         
         # Calculate split summary
         summary = {
             'panel_number': i,
-            'set_a_size': len(set_a),
-            'set_b_size': len(set_b),
+            'num_sets': num_sets,
+            'set_sizes': [len(s) for s in sets],
             'comparisons': {}
         }
         
         for feature in features:
-            if feature not in set_a.columns:
+            if feature not in sets[0].columns:
                 continue
             
-            dist_a = set_a[feature].value_counts(normalize=True).sort_index()
-            dist_b = set_b[feature].value_counts(normalize=True).sort_index()
+            # Get distributions for all sets
+            distributions = [s[feature].value_counts(normalize=True).sort_index() for s in sets]
             
-            all_categories = sorted(set(dist_a.index) | set(dist_b.index))
+            # Get all unique categories across all sets
+            all_categories = sorted(set().union(*[d.index for d in distributions]))
             
             feature_comparison = {}
             for cat in all_categories:
-                val_a = dist_a.get(cat, 0)
-                val_b = dist_b.get(cat, 0)
-                diff = abs(val_a - val_b)
+                # Get values from all sets
+                values = [dist.get(cat, 0) for dist in distributions]
                 
-                feature_comparison[cat] = {
-                    'set_a': val_a,
-                    'set_b': val_b,
-                    'difference': diff,
-                    'status': 'Match' if diff < 0.02 else 'Deviation'
+                # Get target proportion if available
+                target_val = target_dict.get(feature, {}).get(cat, None)
+                
+                # Calculate average and max deviation
+                avg_val = np.mean(values)
+                max_deviation = max([abs(v - avg_val) for v in values])
+                
+                # Also track deviation from target if available
+                target_deviation = None
+                if target_val is not None:
+                    target_deviation = max([abs(v - target_val) for v in values])
+                
+                cat_info = {
+                    'target': target_val,
+                    'average': avg_val,
+                    'max_deviation': max_deviation,
+                    'target_deviation': target_deviation,
+                    'values': {f'set_{j+1}': values[j] for j in range(len(values))},
+                    'status': 'Match' if max_deviation < 0.02 else 'Deviation'
                 }
+                
+                feature_comparison[cat] = cat_info
             
             summary['comparisons'][feature] = feature_comparison
         
@@ -636,4 +693,4 @@ def split_all_panels(panels: List[pd.DataFrame],
     progress_bar.empty()
     status_text.empty()
     
-    return all_splits, {'split_summaries': split_summaries}
+    return all_splits, {'split_summaries': split_summaries, 'num_sets': num_sets}
