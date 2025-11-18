@@ -1,33 +1,735 @@
 """
-Streamlit Data Paneling Tool
-Main application interface for creating balanced, non-overlapping data panels
+Streamlit Data Paneling Tool - Consolidated Version
+Main application for creating balanced, non-overlapping data panels with N-way splitting
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import sys
 import io
+from typing import Dict, List, Tuple, Optional
 
-# Add src directory to path
-sys.path.insert(0, str(Path(__file__).parent))
 
-from paneling import (
-    check_master_distribution,
-    create_panels,
-    split_all_panels
-)
-from utils import (
-    validate_uploaded_file,
-    validate_target_proportions,
-    check_availability,
-    print_distribution_table,
-    check_overlap_between_sets,
-    create_comparison_table,
-    calculate_max_possible_panels,
-    get_feature_statistics
-)
+# ==================== UTILITY FUNCTIONS ====================
 
+def validate_uploaded_file(df: pd.DataFrame) -> Tuple[bool, str]:
+    """
+    Validate uploaded file meets requirements
+    
+    Args:
+        df: Uploaded dataframe
+        
+    Returns:
+        Tuple of (is_valid, message)
+    """
+    if df is None or df.empty:
+        return False, "File is empty"
+    
+    if len(df) < 100:
+        return False, f"File has only {len(df)} rows. Minimum 100 rows required."
+    
+    return True, "File validation successful"
+
+
+def validate_target_proportions(target_dict: Dict) -> Tuple[bool, str]:
+    """
+    Validate target proportions sum to 1.0 for each feature
+    
+    Args:
+        target_dict: Dictionary of {feature: {category: proportion}}
+        
+    Returns:
+        Tuple of (is_valid, message)
+    """
+    for feature, proportions in target_dict.items():
+        total = sum(proportions.values())
+        if abs(total - 1.0) > 0.01:
+            return False, f"Proportions for {feature} sum to {total:.3f}, should be 1.0"
+    
+    return True, "All target proportions are valid"
+
+
+def check_availability(
+    df: pd.DataFrame,
+    target_dict: Dict,
+    num_panels: int,
+    panel_size: int
+) -> Tuple[bool, str]:
+    """
+    Check if enough samples are available for requested configuration
+    
+    Args:
+        df: Master dataframe
+        target_dict: Target proportions
+        num_panels: Number of panels to create
+        panel_size: Size of each panel
+        
+    Returns:
+        Tuple of (is_sufficient, message)
+    """
+    total_needed = num_panels * panel_size
+    total_available = len(df)
+    
+    if total_needed > total_available:
+        return False, f"Insufficient samples: need {total_needed:,}, have {total_available:,}"
+    
+    # Check each feature category
+    warnings = []
+    for feature, targets in target_dict.items():
+        for category, proportion in targets.items():
+            needed = int(total_needed * proportion)
+            available = len(df[df[feature] == category])
+            
+            if needed > available:
+                warnings.append(
+                    f"{feature}={category}: need {needed}, have {available}"
+                )
+    
+    if warnings:
+        warning_msg = "⚠️ Warning: Some categories may not have enough samples:\n" + "\n".join(warnings)
+        return True, warning_msg
+    
+    return True, f"✓ Sufficient samples available ({total_available:,} total)"
+
+
+def print_distribution_table(
+    df: pd.DataFrame,
+    feature: str,
+    target_dict: Dict,
+    panel_name: str = "Panel",
+    adjusted_dict: Optional[Dict] = None
+) -> pd.DataFrame:
+    """
+    Create distribution comparison table
+    
+    Args:
+        df: Panel dataframe
+        feature: Feature to analyze
+        target_dict: Original target proportions
+        panel_name: Name for display
+        adjusted_dict: Optional adjusted proportions after equal deviation
+        
+    Returns:
+        DataFrame with distribution comparison
+    """
+    actual_counts = df[feature].value_counts()
+    actual_props = df[feature].value_counts(normalize=True)
+    
+    categories = list(target_dict.get(feature, {}).keys())
+    
+    data = []
+    for cat in categories:
+        target_prop = target_dict[feature].get(cat, 0)
+        actual_prop = actual_props.get(cat, 0)
+        count = actual_counts.get(cat, 0)
+        
+        # Use adjusted target if available
+        if adjusted_dict and feature in adjusted_dict:
+            target_prop = adjusted_dict[feature].get(cat, target_prop)
+        
+        deviation = actual_prop - target_prop
+        
+        data.append({
+            'Category': cat,
+            'Target': f"{target_prop:.1%}",
+            'Actual': f"{actual_prop:.1%}",
+            'Count': count,
+            'Deviation': f"{deviation:+.1%}",
+            'Status': '✓' if abs(deviation) < 0.02 else '⚠️'
+        })
+    
+    return pd.DataFrame(data)
+
+
+def check_overlap_between_sets(sets: List[Tuple[str, pd.DataFrame]]) -> Dict:
+    """
+    Check for overlaps between multiple sets
+    
+    Args:
+        sets: List of (name, dataframe) tuples
+        
+    Returns:
+        Dictionary with overlap information
+    """
+    results = []
+    has_overlap = False
+    
+    for i in range(len(sets)):
+        for j in range(i + 1, len(sets)):
+            name1, df1 = sets[i]
+            name2, df2 = sets[j]
+            
+            overlap = set(df1.index) & set(df2.index)
+            overlap_count = len(overlap)
+            
+            if overlap_count > 0:
+                has_overlap = True
+            
+            results.append({
+                'Set 1': name1,
+                'Set 2': name2,
+                'Overlap Count': overlap_count,
+                'Status': '❌ Overlap' if overlap_count > 0 else '✓ No Overlap'
+            })
+    
+    return {
+        'has_overlap': has_overlap,
+        'results': results
+    }
+
+
+def create_comparison_table(
+    sets: List[pd.DataFrame],
+    feature: str,
+    target_dict: Dict
+) -> pd.DataFrame:
+    """
+    Create comparison table across multiple sets
+    
+    Args:
+        sets: List of dataframes
+        feature: Feature to compare
+        target_dict: Target proportions
+        
+    Returns:
+        Comparison dataframe
+    """
+    categories = list(target_dict[feature].keys())
+    
+    data = []
+    for cat in categories:
+        row = {'Category': cat}
+        
+        for i, df in enumerate(sets, 1):
+            prop = df[feature].value_counts(normalize=True).get(cat, 0)
+            row[f'Set {i}'] = f"{prop:.1%}"
+        
+        data.append(row)
+    
+    return pd.DataFrame(data)
+
+
+def format_number(n: float) -> str:
+    """Format number with thousands separator"""
+    return f"{int(n):,}"
+
+
+def calculate_max_possible_panels(
+    df: pd.DataFrame,
+    target_dict: Dict,
+    panel_size: int
+) -> int:
+    """
+    Calculate maximum number of panels possible
+    
+    Args:
+        df: Master dataframe
+        target_dict: Target proportions
+        panel_size: Desired panel size
+        
+    Returns:
+        Maximum number of panels
+    """
+    max_panels = len(df) // panel_size
+    
+    for feature, targets in target_dict.items():
+        for category, proportion in targets.items():
+            available = len(df[df[feature] == category])
+            needed_per_panel = panel_size * proportion
+            
+            if needed_per_panel > 0:
+                category_max = int(available / needed_per_panel)
+                max_panels = min(max_panels, category_max)
+    
+    return max_panels
+
+
+def get_feature_statistics(df: pd.DataFrame, feature: str) -> Dict:
+    """
+    Get statistics for a feature
+    
+    Args:
+        df: Dataframe
+        feature: Feature name
+        
+    Returns:
+        Dictionary with statistics
+    """
+    value_counts = df[feature].value_counts()
+    proportions = df[feature].value_counts(normalize=True)
+    
+    return {
+        'unique_values': len(value_counts),
+        'value_counts': value_counts.to_dict(),
+        'proportions': proportions.to_dict(),
+        'most_common': value_counts.index[0],
+        'least_common': value_counts.index[-1]
+    }
+
+
+# ==================== CORE PANELING FUNCTIONS ====================
+
+def check_master_distribution(
+    master_sample: pd.DataFrame,
+    target_dict: Dict[str, Dict],
+    features: List[str],
+    panel_size: int,
+    num_panels: int
+) -> Tuple[bool, Dict]:
+    """
+    Check if master sample has sufficient data for all target distributions
+    
+    Args:
+        master_sample: Full dataset
+        target_dict: Target proportions {feature: {category: proportion}}
+        features: List of features to check
+        panel_size: Size of each panel
+        num_panels: Number of panels to create
+        
+    Returns:
+        Tuple of (is_sufficient, info_dict)
+    """
+    total_needed = panel_size * num_panels
+    info = {
+        'total_available': len(master_sample),
+        'total_needed': total_needed,
+        'is_sufficient': True,
+        'warnings': [],
+        'details': {}
+    }
+    
+    for feature in features:
+        feature_info = {'categories': {}}
+        
+        for category, target_prop in target_dict[feature].items():
+            available = len(master_sample[master_sample[feature] == category])
+            needed = int(total_needed * target_prop)
+            
+            feature_info['categories'][category] = {
+                'available': available,
+                'needed': needed,
+                'target_proportion': target_prop,
+                'is_sufficient': available >= needed
+            }
+            
+            if available < needed:
+                info['is_sufficient'] = False
+                info['warnings'].append(
+                    f"{feature}={category}: need {needed}, have {available}"
+                )
+        
+        info['details'][feature] = feature_info
+    
+    return info['is_sufficient'], info
+
+
+def create_balanced_sample(
+    master_sample: pd.DataFrame,
+    target_dict: Dict[str, Dict],
+    features: List[str],
+    sample_size: int,
+    random_state: int = 42
+) -> pd.DataFrame:
+    """
+    Create a balanced sample matching target proportions across multiple features
+    
+    Args:
+        master_sample: Source dataframe
+        target_dict: Target proportions for each feature
+        features: List of features to balance
+        sample_size: Desired sample size
+        random_state: Random seed
+        
+    Returns:
+        Balanced sample dataframe
+    """
+    np.random.seed(random_state)
+    
+    # Calculate target counts for each combination
+    target_combinations = {}
+    
+    # Get all unique combinations in the data
+    combinations = master_sample[features].drop_duplicates()
+    
+    for _, row in combinations.iterrows():
+        combination = tuple(row[features])
+        
+        # Calculate target proportion for this combination
+        proportion = 1.0
+        for feature, value in zip(features, combination):
+            proportion *= target_dict[feature].get(value, 0)
+        
+        target_count = int(sample_size * proportion)
+        target_combinations[combination] = target_count
+    
+    # Sample from each combination
+    sampled_indices = []
+    
+    for combination, target_count in target_combinations.items():
+        if target_count == 0:
+            continue
+        
+        # Filter for this combination
+        mask = pd.Series([True] * len(master_sample), index=master_sample.index)
+        for feature, value in zip(features, combination):
+            mask &= (master_sample[feature] == value)
+        
+        available_indices = master_sample[mask].index.tolist()
+        
+        if len(available_indices) >= target_count:
+            selected = np.random.choice(available_indices, size=target_count, replace=False)
+            sampled_indices.extend(selected)
+        else:
+            # Use all available samples if not enough
+            sampled_indices.extend(available_indices)
+    
+    return master_sample.loc[sampled_indices]
+
+
+def compute_adjusted_targets(
+    master_sample: pd.DataFrame,
+    target_dict: Dict[str, Dict],
+    features: List[str],
+    total_needed: int
+) -> Tuple[Dict[str, Dict], Dict]:
+    """
+    Compute adjusted target proportions using equal deviation distribution
+    
+    Args:
+        master_sample: Full dataset
+        target_dict: Original target proportions
+        features: List of features
+        total_needed: Total samples needed across all panels
+        
+    Returns:
+        Tuple of (adjusted_targets, allocation_info)
+    """
+    adjusted_targets = {}
+    allocation_info = {
+        'adjustments_made': False,
+        'features': {}
+    }
+    
+    for feature in features:
+        feature_info = {'categories': {}, 'needs_adjustment': False}
+        adjusted_targets[feature] = {}
+        
+        categories = list(target_dict[feature].keys())
+        original_targets = [target_dict[feature][cat] for cat in categories]
+        availabilities = [len(master_sample[master_sample[feature] == cat]) for cat in categories]
+        
+        # Check if any category is insufficient
+        needs_adjustment = any(
+            avail < (total_needed * target) 
+            for avail, target in zip(availabilities, original_targets)
+        )
+        
+        if needs_adjustment:
+            feature_info['needs_adjustment'] = True
+            allocation_info['adjustments_made'] = True
+            
+            # Apply equal deviation distribution
+            target_counts = [int(total_needed * t) for t in original_targets]
+            allocated = [0] * len(categories)
+            
+            # First pass: allocate up to availability
+            for i, (target, avail) in enumerate(zip(target_counts, availabilities)):
+                allocated[i] = min(target, avail)
+            
+            # Calculate deficit
+            total_allocated = sum(allocated)
+            deficit = total_needed - total_allocated
+            
+            # Distribute deficit proportionally among categories with surplus
+            if deficit > 0:
+                surplus_indices = [
+                    i for i in range(len(categories))
+                    if availabilities[i] > allocated[i]
+                ]
+                
+                if surplus_indices:
+                    # Calculate proportional shares of deficit
+                    surplus_capacities = [
+                        availabilities[i] - allocated[i]
+                        for i in surplus_indices
+                    ]
+                    total_surplus = sum(surplus_capacities)
+                    
+                    for i in surplus_indices:
+                        additional = int(
+                            deficit * (availabilities[i] - allocated[i]) / total_surplus
+                        )
+                        allocated[i] += additional
+                    
+                    # Handle rounding: distribute remaining to largest surplus
+                    remaining = total_needed - sum(allocated)
+                    if remaining > 0:
+                        sorted_surplus = sorted(
+                            surplus_indices,
+                            key=lambda i: availabilities[i] - allocated[i],
+                            reverse=True
+                        )
+                        for i in sorted_surplus[:remaining]:
+                            allocated[i] += 1
+            
+            # Convert to proportions
+            for i, cat in enumerate(categories):
+                adjusted_targets[feature][cat] = allocated[i] / total_needed
+                feature_info['categories'][cat] = {
+                    'original_proportion': original_targets[i],
+                    'adjusted_proportion': allocated[i] / total_needed,
+                    'original_count': target_counts[i],
+                    'adjusted_count': allocated[i],
+                    'available': availabilities[i]
+                }
+        else:
+            # No adjustment needed, use original targets
+            for cat in categories:
+                adjusted_targets[feature][cat] = target_dict[feature][cat]
+                feature_info['categories'][cat] = {
+                    'original_proportion': target_dict[feature][cat],
+                    'adjusted_proportion': target_dict[feature][cat],
+                    'available': len(master_sample[master_sample[feature] == cat])
+                }
+        
+        allocation_info['features'][feature] = feature_info
+    
+    return adjusted_targets, allocation_info
+
+
+def create_panels(
+    master_sample: pd.DataFrame,
+    target_dict: Dict[str, Dict],
+    features: List[str],
+    num_panels: int,
+    panel_size: int,
+    random_state: int = 42
+) -> Tuple[List[pd.DataFrame], Dict]:
+    """
+    Create multiple non-overlapping panels with target distributions
+    
+    Args:
+        master_sample: Source dataframe
+        target_dict: Target proportions
+        features: Features to balance
+        num_panels: Number of panels to create
+        panel_size: Size of each panel
+        random_state: Random seed
+        
+    Returns:
+        Tuple of (list of panel dataframes, statistics dict)
+    """
+    # Check availability and compute adjusted targets if needed
+    total_needed = num_panels * panel_size
+    adjusted_targets, allocation_info = compute_adjusted_targets(
+        master_sample, target_dict, features, total_needed
+    )
+    
+    # Use adjusted targets for panel creation
+    working_targets = adjusted_targets if allocation_info['adjustments_made'] else target_dict
+    
+    panels = []
+    panel_summaries = []
+    remaining_sample = master_sample.copy()
+    
+    for i in range(num_panels):
+        panel = create_balanced_sample(
+            remaining_sample,
+            working_targets,
+            features,
+            panel_size,
+            random_state=random_state + i
+        )
+        
+        panels.append(panel)
+        
+        # Remove used samples
+        remaining_sample = remaining_sample.drop(panel.index)
+        
+        # Create summary
+        summary = {
+            'panel_number': i + 1,
+            'size': len(panel),
+            'distributions': {}
+        }
+        
+        for feature in features:
+            dist = panel[feature].value_counts(normalize=True).to_dict()
+            summary['distributions'][feature] = dist
+        
+        panel_summaries.append(summary)
+    
+    stats = {
+        'num_panels': num_panels,
+        'panel_size': panel_size,
+        'total_used': sum(len(p) for p in panels),
+        'total_available': len(master_sample),
+        'panel_summaries': panel_summaries,
+        'allocation_info': allocation_info
+    }
+    
+    return panels, stats
+
+
+def split_panel_into_n_sets(
+    panel: pd.DataFrame,
+    target_dict: Dict[str, Dict],
+    features: List[str],
+    num_sets: int = 2,
+    random_state: int = 42
+) -> Tuple[List[pd.DataFrame], Dict]:
+    """
+    Split a single panel into N equal, balanced sets using round-robin stratified assignment
+    
+    Args:
+        panel: Panel dataframe to split
+        target_dict: Target proportions (for validation)
+        features: Features to maintain balance on
+        num_sets: Number of sets to create (default: 2)
+        random_state: Random seed for reproducibility
+        
+    Returns:
+        Tuple of (list of N set dataframes, statistics dict)
+    """
+    np.random.seed(random_state)
+    
+    # Initialize sets
+    sets = [[] for _ in range(num_sets)]
+    
+    # Get all unique combinations of feature values
+    combinations = panel[features].drop_duplicates()
+    
+    # For each combination, split its samples evenly across sets
+    for _, combo_row in combinations.iterrows():
+        # Create mask for this combination
+        mask = pd.Series([True] * len(panel), index=panel.index)
+        for feature in features:
+            mask &= (panel[feature] == combo_row[feature])
+        
+        # Get indices for this combination
+        combo_indices = panel[mask].index.tolist()
+        
+        # Shuffle indices
+        np.random.shuffle(combo_indices)
+        
+        # Distribute round-robin across sets
+        for i, idx in enumerate(combo_indices):
+            set_num = i % num_sets
+            sets[set_num].append(idx)
+    
+    # Convert to dataframes
+    set_dfs = [panel.loc[indices] for indices in sets]
+    
+    # Calculate statistics
+    stats = {
+        'num_sets': num_sets,
+        'set_sizes': [len(s) for s in set_dfs],
+        'comparisons': {}
+    }
+    
+    # Compare distributions across sets
+    for feature in features:
+        feature_comparison = {}
+        
+        # Get all categories for this feature
+        categories = panel[feature].unique()
+        
+        for category in categories:
+            cat_info = {
+                'values': {},
+                'target': target_dict[feature].get(category, None)
+            }
+            
+            # Get proportion in each set
+            proportions = []
+            for set_idx, set_df in enumerate(set_dfs):
+                prop = (set_df[feature] == category).sum() / len(set_df)
+                cat_info['values'][f'set_{set_idx + 1}'] = prop
+                proportions.append(prop)
+            
+            # Calculate deviation
+            if proportions:
+                cat_info['mean'] = np.mean(proportions)
+                cat_info['std'] = np.std(proportions)
+                cat_info['max_deviation'] = max(proportions) - min(proportions)
+                cat_info['status'] = '✓' if cat_info['max_deviation'] < 0.02 else '⚠️'
+            
+            feature_comparison[category] = cat_info
+        
+        stats['comparisons'][feature] = feature_comparison
+    
+    return set_dfs, stats
+
+
+def split_panel_into_two(
+    panel: pd.DataFrame,
+    target_dict: Dict[str, Dict],
+    features: List[str],
+    random_state: int = 42
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
+    """
+    Legacy function: Split a panel into two equal sets (wrapper around split_panel_into_n_sets)
+    
+    Args:
+        panel: Panel dataframe to split
+        target_dict: Target proportions
+        features: Features to maintain balance on
+        random_state: Random seed
+        
+    Returns:
+        Tuple of (set_a, set_b, statistics dict)
+    """
+    sets, stats = split_panel_into_n_sets(
+        panel, target_dict, features, num_sets=2, random_state=random_state
+    )
+    return sets[0], sets[1], stats
+
+
+def split_all_panels(
+    panels: List[pd.DataFrame],
+    target_dict: Dict[str, Dict],
+    features: List[str],
+    num_sets: int = 2,
+    random_state: int = 42
+) -> Tuple[List[List[pd.DataFrame]], Dict]:
+    """
+    Split all panels into N sets each
+    
+    Args:
+        panels: List of panel dataframes
+        target_dict: Target proportions
+        features: Features to balance
+        num_sets: Number of sets to create per panel (default: 2)
+        random_state: Random seed
+        
+    Returns:
+        Tuple of (list of panel splits, where each split is a list of N sets, statistics dict)
+    """
+    all_splits = []
+    split_summaries = []
+    
+    for i, panel in enumerate(panels):
+        sets, stats = split_panel_into_n_sets(
+            panel,
+            target_dict,
+            features,
+            num_sets=num_sets,
+            random_state=random_state + i
+        )
+        
+        all_splits.append(sets)
+        split_summaries.append(stats)
+    
+    overall_stats = {
+        'num_panels': len(panels),
+        'num_sets': num_sets,
+        'split_summaries': split_summaries
+    }
+    
+    return all_splits, overall_stats
+
+
+# ==================== STREAMLIT UI ====================
 
 # Page configuration
 st.set_page_config(
@@ -97,7 +799,7 @@ def main():
     - Upload and analyze your dataset
     - Define target proportions for multiple stratification variables
     - Create multiple non-overlapping panels
-    - Split each panel into two balanced sets (Set A & Set B)
+    - Split each panel into N balanced sets (2-10 sets)
     - Validate distributions and check for overlaps
     - Export results to CSV
     """)
@@ -742,12 +1444,13 @@ def main():
             summary_text.write("="*80 + "\n\n")
             
             summary_text.write(f"Total Panels Created: {len(panel_splits)}\n")
-            summary_text.write(f"Total Sets Generated: {len(panel_splits) * 2}\n\n")
+            summary_text.write(f"Total Sets Generated: {len(panel_splits) * num_sets_created}\n\n")
             
             summary_text.write("PANEL & SET SIZES:\n")
             summary_text.write("-" * 80 + "\n")
-            for i, (set_a, set_b) in enumerate(panel_splits, 1):
-                summary_text.write(f"Panel {i}: Set A = {len(set_a):,}, Set B = {len(set_b):,}\n")
+            for i, sets in enumerate(panel_splits, 1):
+                size_str = ", ".join([f"Set {j+1} = {len(s):,}" for j, s in enumerate(sets)])
+                summary_text.write(f"Panel {i}: {size_str}\n")
             
             summary_text.write("\n" + "="*80 + "\n")
             
