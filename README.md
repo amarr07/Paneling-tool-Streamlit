@@ -38,7 +38,12 @@ A comprehensive Streamlit-based application for creating balanced, non-overlappi
 
 1. **Launch the application:**
    ```bash
-   streamlit run src/main.py
+   ./run_app.sh
+   ```
+   
+   Or directly:
+   ```bash
+   streamlit run main.py
    ```
 
 2. **Follow the workflow:**
@@ -59,9 +64,10 @@ A comprehensive Streamlit-based application for creating balanced, non-overlappi
    - Review detailed statistics for each panel
    
    **Step 4: Split Panels**
-   - Split each panel into Set A and Set B
+   - **NEW**: Choose how many sets to split each panel into (2-10 sets)
+   - Split each panel into N equal, balanced sets
    - Maintains proportional balance across all stratification variables
-   - Compare distributions between sets
+   - Compare distributions across all sets
    
    **Step 5: Validate & Export**
    - Verify no overlaps exist between any sets
@@ -69,22 +75,24 @@ A comprehensive Streamlit-based application for creating balanced, non-overlappi
    - Download individual files or batch export
    - Generate summary report
 
-## Folder Structure
+## Project Structure
 
 ```
 Panneling/
-├── src/
-│   ├── main.py          # Main Streamlit application
-│   ├── paneling.py      # Core paneling logic
-│   └── utils.py         # Utility functions
+├── main.py              # Consolidated Streamlit application (all-in-one)
+├── tests/               # Test files
+│   ├── test_paneling.py
+│   ├── test_n_way_split.py
+│   └── test_equal_deviation.py
 ├── data/                # Output directory for CSV files
 ├── config/             
 ├── requirements.txt     # Python dependencies
+├── run_app.sh          # Launch script
 ├── README.md           # This file
-├── instructions.md     # Project instructions
-├── reference.py        # Reference implementation
-└── Bihar_panels.xlsx   # Example data
+└── Bihar_panels.xlsx   # Example dataset
 ```
+
+**Note**: All code has been consolidated into a single `main.py` file for easier deployment and distribution.
 
 ## Algorithm Details
 
@@ -97,38 +105,50 @@ The tool uses **iterative proportional fitting with multi-dimensional stratified
 3. **Proportional Allocation**: Allocates samples to match target proportions
 4. **Non-Overlapping**: Maintains a set of used indices to ensure exclusivity
 
-### Panel Splitting
+### Panel Splitting (N-Way)
 
-Each panel is split using **joint stratification**:
+Each panel can be split into N equal sets using **round-robin stratified assignment**:
 
 1. **Strata Creation**: Combines all target features into unique strata
-2. **50-50 Split**: Within each stratum, randomly assigns half to Set A, half to Set B
-3. **Balance Preservation**: Ensures both sets maintain the same proportional distributions
+2. **N-Way Distribution**: Within each stratum, distributes samples evenly across N sets using round-robin
+3. **Balance Preservation**: Ensures all N sets maintain the same proportional distributions
+4. **Max Deviation Tracking**: Monitors maximum deviation across all sets for each category
 
-## Key Functions
+## Key Functions (in main.py)
 
-### `paneling.py`
+The consolidated `main.py` file contains all functionality organized into sections:
+
+### Core Paneling Functions
 
 - `check_master_distribution()`: Validates dataset has sufficient samples
 - `create_balanced_sample()`: Creates a single balanced sample with target distributions
+- `compute_adjusted_targets()`: Applies equal deviation distribution when samples are insufficient
 - `create_panels()`: Creates multiple non-overlapping panels
-- `split_panel_into_two()`: Splits a panel into two balanced sets
-- `split_all_panels()`: Splits all panels
+- `split_panel_into_n_sets()`: Splits a panel into N balanced sets (NEW!)
+- `split_panel_into_two()`: Legacy function, wrapper around N-way split
+- `split_all_panels()`: Splits all panels into N sets each
 
-### `utils.py`
+### Utility Functions
 
 - `validate_uploaded_file()`: Validates input data
 - `validate_target_proportions()`: Ensures targets sum to 1.0
 - `check_availability()`: Verifies sufficient samples for requested panels
 - `print_distribution_table()`: Creates formatted distribution tables
 - `check_overlap_between_sets()`: Verifies mutual exclusivity
-- `create_comparison_table()`: Compares two sets side-by-side
+- `create_comparison_table()`: Compares distributions across multiple sets
+- `calculate_max_possible_panels()`: Calculates maximum feasible panels
+- `get_feature_statistics()`: Provides feature-level statistics
+
+### Streamlit UI
+
+- `initialize_session_state()`: Manages application state
+- `main()`: Main application with 5-step workflow
 
 ## Example Workflow
 
-```python
-# This is handled through the Streamlit UI, but the underlying logic:
+The Streamlit UI handles this automatically, but the underlying logic flow is:
 
+```python
 # 1. Load data
 df = pd.read_excel('Bihar_panels.xlsx')
 
@@ -146,13 +166,15 @@ panels, stats = create_panels(
     num_panels=3, panel_size=1050, random_state=42
 )
 
-# 4. Split panels
-splits, split_stats = split_all_panels(panels, targets, features, random_state=42)
+# 4. Split panels into N sets (e.g., 3 sets per panel)
+splits, split_stats = split_all_panels(
+    panels, targets, features, num_sets=3, random_state=42
+)
 
-# 5. Export
-for i, (set_a, set_b) in enumerate(splits, 1):
-    set_a.to_csv(f'data/panel_{i}_set_a.csv')
-    set_b.to_csv(f'data/panel_{i}_set_b.csv')
+# 5. Export (e.g., for 3 sets per panel)
+for panel_idx, sets in enumerate(splits, 1):
+    for set_idx, set_df in enumerate(sets, 1):
+        set_df.to_csv(f'data/panel_{panel_idx}_set_{set_idx}.csv')
 ```
 
 ## Validation & Quality Checks
@@ -161,16 +183,18 @@ The tool performs multiple validation checks:
 
 - **Pre-Creation**: Checks if master dataset has sufficient samples for targets
 - **Post-Creation**: Compares actual vs. target distributions for each panel
-- **Post-Split**: Verifies Set A and Set B have matching distributions
-- **Overlap Check**: Ensures complete mutual exclusivity across all sets
+- **Post-Split**: Verifies all N sets have matching distributions with deviation tracking
+- **Overlap Check**: Ensures complete mutual exclusivity across all panels and sets
 
 ## Output Files
 
-Generated CSV files follow this naming convention:
-- `panel_1_set_a.csv`
-- `panel_1_set_b.csv`
-- `panel_2_set_a.csv`
-- `panel_2_set_b.csv`
+Generated CSV files follow this naming convention (example with 3 sets per panel):
+- `panel_1_set_1.csv`
+- `panel_1_set_2.csv`
+- `panel_1_set_3.csv`
+- `panel_2_set_1.csv`
+- `panel_2_set_2.csv`
+- `panel_2_set_3.csv`
 - etc.
 
 Each file contains:
@@ -198,19 +222,24 @@ Each file contains:
 ## Technical Details
 
 - **Python Version**: 3.8+
+- **Architecture**: Single consolidated Python file for easy deployment
 - **Main Dependencies**: 
   - Streamlit 1.28+
   - pandas 2.0+
   - numpy 1.24+
 - **Random State**: Fully reproducible results with seed control
-
-## Reference Implementation
-
-See `reference.py` for the original implementation logic that this tool is based on. The Streamlit application wraps this logic with an interactive interface while maintaining the same rigorous statistical approach.
+- **Code Organization**: ~1,570 lines organized into utility, core paneling, and UI sections
 
 ## Support
 
-For questions or issues, refer to the `instructions.md` file or contact your administrator.
+For questions or issues, please refer to this README or contact your administrator.
+
+## Version History
+
+- **v1.3**: N-way panel splitting (2-10 sets per panel)
+- **v1.2**: Equal deviation distribution for insufficient samples
+- **v1.1**: Initial release with 2-way splitting
+- **v1.4**: Consolidated all code into single `main.py` file (Current)
 
 ## License
 
