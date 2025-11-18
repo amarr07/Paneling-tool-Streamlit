@@ -8,4 +8,4 @@ echo "Press Ctrl+C to stop the server"
 echo ""
 
 cd "$(dirname "$0")"
-streamlit run src/main.py
+streamlit run main.py
