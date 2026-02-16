@@ -1,4 +1,4 @@
-# Stratified-Data-Paneling-tool
+# Representative Unbiased Sampling
 
 A comprehensive Streamlit-based application for creating balanced, non-overlapping data panels with precise stratification control.
 
